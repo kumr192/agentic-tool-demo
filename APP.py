@@ -1,20 +1,17 @@
-import os
 import json
 import datetime as dt
 import streamlit as st
 from openai import OpenAI
 
-# ---------- Tools you expose to the model ----------
+# ---------------- Tools ----------------
 def get_time() -> str:
     return dt.datetime.now().isoformat()
 
 def calc(expression: str) -> str:
-    # Very small safety guard: only allow a restricted set of chars
     allowed = set("0123456789+-*/(). %")
     if any(ch not in allowed for ch in expression):
         return "Rejected: expression contains disallowed characters."
     try:
-        # WARNING: eval is dangerous in general. This is a demo with tight filtering.
         return str(eval(expression, {"__builtins__": {}}, {}))
     except Exception as e:
         return f"Error: {e}"
@@ -49,9 +46,9 @@ TOOL_MAP = {
     "calc": lambda args: calc(args.get("expression", "")),
 }
 
-# ---------- Agent loop ----------
-def run_agent(user_text: str):
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+# ---------------- Agent loop ----------------
+def run_agent(user_text: str, api_key: str):
+    client = OpenAI(api_key=api_key)
 
     messages = [
         {"role": "system", "content": "You are a helpful assistant. Use tools when useful. If you use a tool, do it explicitly."},
@@ -60,7 +57,6 @@ def run_agent(user_text: str):
 
     tool_log = []
 
-    # Simple loop: allow up to 3 tool calls max
     for _ in range(3):
         resp = client.responses.create(
             model="gpt-4.1-mini",
@@ -68,56 +64,64 @@ def run_agent(user_text: str):
             tools=TOOLS,
         )
 
-        # Collect tool calls (if any)
         tool_calls = [item for item in resp.output if item.type == "tool_call"]
         if not tool_calls:
-            # Final answer
-            final_text = ""
-            for item in resp.output:
-                if item.type == "output_text":
-                    final_text += item.text
+            final_text = "".join([item.text for item in resp.output if item.type == "output_text"])
             return final_text.strip(), tool_log
 
-        # Execute each tool call, then feed results back
         for tc in tool_calls:
             name = tc.name
-            args = tc.arguments or "{}"
+            raw_args = tc.arguments or "{}"
             try:
-                args_obj = json.loads(args)
+                args = json.loads(raw_args)
             except Exception:
-                args_obj = {}
+                args = {}
 
-            tool_log.append({"tool": name, "arguments": args_obj})
+            tool_log.append({"tool": name, "arguments": args})
 
             if name not in TOOL_MAP:
-                tool_result = f"Unknown tool: {name}"
+                result = f"Unknown tool: {name}"
             else:
-                tool_result = TOOL_MAP[name](args_obj)
+                result = TOOL_MAP[name](args)
 
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
-                "content": str(tool_result),
+                "content": str(result),
             })
 
     return "Stopped: too many tool calls.", tool_log
 
+# ---------------- UI ----------------
+st.set_page_config(page_title="BYOK Agentic Tool Demo", page_icon="🛠️", layout="centered")
+st.title("Agentic Tool-Calling Demo (BYOK)")
 
-# ---------- Streamlit UI ----------
-st.set_page_config(page_title="Agentic Tool-Calling Demo", page_icon="🛠️", layout="centered")
-st.title("Agentic AI Demo (Tool Calling)")
+if "api_key" not in st.session_state:
+    st.session_state.api_key = ""
 
-st.write("Ask something like: 'What time is it?' or 'Compute (19*7)+3' or 'Use tools if needed.'")
+with st.sidebar:
+    st.header("Bring Your Own Key")
+    st.session_state.api_key = st.text_input(
+        "OpenAI API Key",
+        type="password",
+        value=st.session_state.api_key,
+        placeholder="sk-..."
+    )
+    if st.button("Clear key"):
+        st.session_state.api_key = ""
+        st.rerun()
+    st.warning("Only paste a key if you trust this server. The server must receive your key to call OpenAI.")
 
-user_text = st.text_input("Your prompt", placeholder="Try: What is (19*7)+3 and what time is it?")
+user_text = st.text_input("Your prompt", placeholder="Try: What time is it and compute (19*7)+3")
 
 if st.button("Run"):
-    if not os.environ.get("OPENAI_API_KEY"):
-        st.error("Missing OPENAI_API_KEY environment variable.")
+    api_key = (st.session_state.api_key or "").strip()
+    if not api_key:
+        st.error("Paste your OpenAI API key in the sidebar.")
     elif not user_text.strip():
         st.warning("Type something first.")
     else:
-        answer, tool_log = run_agent(user_text)
+        answer, tool_log = run_agent(user_text, api_key)
 
         if tool_log:
             st.subheader("Tool calls")
